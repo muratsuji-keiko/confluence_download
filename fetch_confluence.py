@@ -67,15 +67,7 @@ def authenticate_google_drive():
             creds.refresh(Request())  # トークンをリフレッシュ
         else:
             flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-
-            # ✅ Render環境では `run_local_server()` ではなく `authorization_url` を使う
-            auth_url, _ = flow.authorization_url(prompt="consent")
-            print(f"🔗 認証用のURL: {auth_url}")
-
-            # ✅ ユーザーが手動でコードを入力する
-            auth_code = input("🔑 上記のリンクを開き、認証コードを入力してください: ").strip()
-            flow.fetch_token(code=auth_code)
-            creds = flow.credentials
+            creds = flow.run_console()
 
         with open("token.pickle", "wb") as token:
             pickle.dump(creds, token)
@@ -83,26 +75,6 @@ def authenticate_google_drive():
     return build("drive", "v3", credentials=creds)
 
 drive_service = authenticate_google_drive()
-
-def get_or_create_drive_folder(folder_name, parent_folder_id):
-    """Google Drive上で親ページフォルダを取得 or 作成（子フォルダは作らない）"""
-    query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and '{parent_folder_id}' in parents and trashed=false"
-    results = drive_service.files().list(
-        q=query, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True
-    ).execute().get("files", [])
-
-    if results:
-        return results[0]["id"]
-
-    folder_metadata = {
-        "name": folder_name,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents": [parent_folder_id]
-    }
-    folder = drive_service.files().create(
-        body=folder_metadata, fields="id", supportsAllDrives=True
-    ).execute()
-    return folder.get("id")
 
 def fetch_page_content(page_id):
     """Confluence からページ内容を取得"""
@@ -176,10 +148,23 @@ def upload_to_google_drive(file_name, content, parent_folder_id, page_id):
         drive_service.files().create(body=file_metadata, media_body=media, fields="id", supportsAllDrives=True).execute()
         print(f"✅ Uploaded: {formatted_file_name}")
 
+def fetch_and_upload_recursive(page_id, parent_folder_id):
+    """再帰的に Confluence ページを取得し、Google Drive に保存"""
+    title, content = fetch_page_content(page_id)
+
+    if title and (title.lower().startswith("wip") or any(keyword in title for keyword in EXCLUDED_TITLES)):
+        print(f"⏭ Skipping excluded page: {title}")
+        return
+
+    if content:
+        upload_to_google_drive(title, content, parent_folder_id, page_id)
+
+    for child in fetch_child_pages(page_id):
+        fetch_and_upload_recursive(child["id"], parent_folder_id)
+
 def main():
     for parent_page in PARENT_PAGES:
-        parent_folder_id = get_or_create_drive_folder(parent_page["name"], PARENT_FOLDER_ID)
-        fetch_and_upload_recursive(parent_page["id"], parent_folder_id)
+        fetch_and_upload_recursive(parent_page["id"], PARENT_FOLDER_ID)
 
 if __name__ == "__main__":
     main()
