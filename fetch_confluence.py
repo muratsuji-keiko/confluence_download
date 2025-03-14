@@ -3,12 +3,12 @@ import io
 import os
 import re
 import pickle
-import base64
 import json
+import base64
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
-from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
+from google_auth_oauthlib.flow import InstalledAppFlow
 from reportlab.platypus import Paragraph, SimpleDocTemplate
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase import pdfmetrics
@@ -18,7 +18,7 @@ from reportlab.lib.enums import TA_LEFT
 from reportlab.lib import colors
 from bs4 import BeautifulSoup
 
-# ✅ Confluence認証（環境変数から取得）
+# ✅ Confluence 認証（環境変数から取得）
 CONFLUENCE_PAT = os.getenv("CONFLUENCE_PAT")
 CONFLUENCE_URL = "https://confl.arms.dmm.com"
 headers = {
@@ -26,9 +26,9 @@ headers = {
     "Accept": "application/json"
 }
 
-# ✅ Google Drive API設定
+# ✅ Google Drive API 設定
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-PARENT_FOLDER_ID = "1043WWogLOtmo63cUYKkYoBk5ub0sgShM"
+PARENT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
 
 PARENT_PAGES = [
     {"id": "2191300228", "name": "01.事業監査会_2025年度"},
@@ -38,36 +38,37 @@ PARENT_PAGES = [
     {"id": "469843465", "name": "99.FAQ"}
 ]
 
-# 🔽 除外対象のタイトルリスト
 EXCLUDED_TITLES = ["廃止", "2020予算", "2020年度", "2021予算", "2021年度",
                     "2022予算", "2022年度", "2023予算", "2023年度", "2024予算", "2024年度"]
 
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+# ✅ 環境変数から `credentials.json` を復元
+def restore_google_credentials():
+    credentials_b64 = os.getenv("GOOGLE_CREDENTIALS")
+    if credentials_b64:
+        with open("credentials.json", "wb") as f:
+            f.write(base64.b64decode(credentials_b64))
+        print("✅ credentials.json を復元しました")
+    else:
+        print("⚠️ 環境変数 GOOGLE_CREDENTIALS が設定されていません")
+        exit(1)
 
+restore_google_credentials()
+
+# ✅ Google 認証
 def authenticate_google_drive():
     creds = None
 
-    # Render の環境変数から `credentials.json` を取得（Base64 デコード）
-    google_credentials_base64 = os.getenv("GOOGLE_CREDENTIALS_B64")
-    if google_credentials_base64:
-        google_credentials_json = base64.b64decode(google_credentials_base64).decode("utf-8")
-        with open("credentials.json", "w") as temp_file:
-            temp_file.write(google_credentials_json)  # 一時的にファイルを作成
-
-    # `token.pickle` のキャッシュを利用（過去に認証した場合）
     if os.path.exists("token.pickle"):
         with open("token.pickle", "rb") as token:
             creds = pickle.load(token)
 
-    # 初回認証の場合、Googleの認証フローを実行（ブラウザなしで可能な方法に変更）
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
             flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-            creds = flow.run_console()  # `run_local_server()` ではなく `run_console()` に変更
+            creds = flow.run_local_server(port=0)
 
-        # 認証情報を保存
         with open("token.pickle", "wb") as token:
             pickle.dump(creds, token)
 
@@ -75,7 +76,28 @@ def authenticate_google_drive():
 
 drive_service = authenticate_google_drive()
 
+def get_or_create_drive_folder(folder_name, parent_folder_id):
+    """Google Drive上で親ページフォルダを取得 or 作成（子フォルダは作らない）"""
+    query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and '{parent_folder_id}' in parents and trashed=false"
+    results = drive_service.files().list(
+        q=query, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True
+    ).execute().get("files", [])
+
+    if results:
+        return results[0]["id"]
+
+    folder_metadata = {
+        "name": folder_name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_folder_id]
+    }
+    folder = drive_service.files().create(
+        body=folder_metadata, fields="id", supportsAllDrives=True
+    ).execute()
+    return folder.get("id")
+
 def fetch_page_content(page_id):
+    """Confluence からページ内容を取得"""
     url = f"{CONFLUENCE_URL}/rest/api/content/{page_id}?expand=body.export_view,title"
     response = requests.get(url, headers=headers)
 
@@ -85,99 +107,66 @@ def fetch_page_content(page_id):
 
     data = response.json()
     title = data.get("title", "Untitled")
-
-    # `export_view` の生HTMLを取得
     raw_content = data.get("body", {}).get("export_view", {}).get("value", "")
 
     if not raw_content:
         return title, "(本文なし)"
 
-    # 🎯 余計なタグや特殊文字を削除
     soup = BeautifulSoup(raw_content, "html.parser")
     text_content = soup.get_text("\n").strip()
 
-    # 🎯 Unicode制御文字（ゼロ幅スペースなど）を削除
+    # ✅ ゼロ幅スペースや制御文字を削除
     text_content = re.sub(r'[\u200B-\u200D\uFEFF]', '', text_content)
 
     return title, f"# {title}\n\n{text_content}"
 
-def upload_to_google_drive(page_id, file_name, content, parent_folder_id):
-    """コンフルエンスのページ内容をメモリ上でPDF化し、Google Driveに直接アップロード"""
+def fetch_child_pages(page_id):
+    """指定した Confluence ページの子ページ一覧を取得"""
+    url = f"{CONFLUENCE_URL}/rest/api/content/{page_id}/child/page?expand=title"
+    response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        print(f"❌ Error fetching child pages: {response.status_code} - {response.text}")
+        return []
+    return response.json().get("results", [])
 
-    # **日本語フォントを登録**
-    font_path = "C:/Windows/Fonts/msgothic.ttc"
-    pdfmetrics.registerFont(TTFont("MSGothic", font_path))
+def upload_to_google_drive(file_name, content, parent_folder_id, page_id):
+    """ページIDを使ってGoogle Drive内のファイルを上書き判定し、PDFを保存"""
 
-    # **メモリ上でPDFを生成**
     pdf_buffer = io.BytesIO()
     doc = SimpleDocTemplate(pdf_buffer, pagesize=A4)
 
-    # **スタイル設定**
     styles = getSampleStyleSheet()
-    styles["Normal"].fontName = "MSGothic"
     styles["Normal"].fontSize = 10
     styles["Normal"].leading = 12
+    styles["Normal"].alignment = TA_LEFT
     styles["Normal"].textColor = colors.black
 
-    # **タイトルを設定**
     title_paragraph = Paragraph(f"<b>{file_name}</b>", styles["Normal"])
-
-    # **本文を改行処理してセット**
     content = content.replace("\n", "<br/>")
     body_paragraph = Paragraph(content, styles["Normal"])
 
-    # **PDF に書き込み**
     elements = [title_paragraph, body_paragraph]
     doc.build(elements)
 
-    # **PDFデータをバッファに保存**
     pdf_buffer.seek(0)
+    media = MediaIoBaseUpload(pdf_buffer, mimetype="application/pdf", resumable=True)
 
-    # **Google Drive 内で「ページIDを含むファイル名」を検索**
-    formatted_file_name = f"{page_id}_{file_name}.pdf"
+    formatted_file_name = f"{file_name}.pdf"
     query = f"name = '{formatted_file_name}' and '{parent_folder_id}' in parents and trashed=false"
     results = drive_service.files().list(
-        q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True
+        q=query, fields="files(id, name, appProperties)", supportsAllDrives=True, includeItemsFromAllDrives=True
     ).execute()
     existing_files = results.get("files", [])
 
-    media = MediaIoBaseUpload(pdf_buffer, mimetype="application/pdf", resumable=True)
+    matching_file = next((file for file in existing_files if file.get("appProperties", {}).get("page_id") == str(page_id)), None)
 
-    if existing_files:
-        file_id = existing_files[0]["id"]
-        drive_service.files().update(
-            fileId=file_id,
-            media_body=media,
-            supportsAllDrives=True
-        ).execute()
-        print(f"♻️ Updated: {formatted_file_name} (File ID: {file_id})")
+    if matching_file:
+        drive_service.files().update(fileId=matching_file["id"], media_body=media, supportsAllDrives=True).execute()
+        print(f"♻️ Updated: {formatted_file_name}")
     else:
-        file_metadata = {
-            "name": formatted_file_name,
-            "parents": [parent_folder_id]
-        }
-        file = drive_service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields="id",
-            supportsAllDrives=True
-        ).execute()
-        print(f"✅ Uploaded: {formatted_file_name} (File ID: {file.get('id')})")
-
-def fetch_and_upload_recursive(page_id, parent_folder_id):
-    title, content = fetch_page_content(page_id)
-
-    if title and (title.lower().startswith("wip") or any(keyword in title for keyword in EXCLUDED_TITLES)):
-        print(f"⏭ Skipping excluded page: {title}")
-        return
-
-    if content:
-        formatted_file_name = f"{page_id}_{title}"
-        upload_to_google_drive(page_id, formatted_file_name, content, parent_folder_id)
-
-    child_pages = fetch_child_pages(page_id)
-    for child in child_pages:
-        fetch_and_upload_recursive(child["id"], parent_folder_id)
+        file_metadata = {"name": formatted_file_name, "parents": [parent_folder_id], "appProperties": {"page_id": str(page_id)}}
+        drive_service.files().create(body=file_metadata, media_body=media, fields="id", supportsAllDrives=True).execute()
+        print(f"✅ Uploaded: {formatted_file_name}")
 
 def main():
     for parent_page in PARENT_PAGES:
@@ -185,5 +174,4 @@ def main():
         fetch_and_upload_recursive(parent_page["id"], parent_folder_id)
 
 if __name__ == "__main__":
-    drive_service = authenticate_google_drive()
     main()
