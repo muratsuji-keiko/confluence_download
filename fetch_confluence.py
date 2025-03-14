@@ -47,33 +47,33 @@ SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 def authenticate_google_drive():
     creds = None
 
-    # Render では環境変数 `GOOGLE_CREDENTIALS` を使用
-    google_credentials_base64 = os.getenv("GOOGLE_CREDENTIALS")
+    # Render の環境変数から `credentials.json` を取得（Base64 デコード）
+    google_credentials_base64 = os.getenv("GOOGLE_CREDENTIALS_B64")
     if google_credentials_base64:
         google_credentials_json = base64.b64decode(google_credentials_base64).decode("utf-8")
-        with open("credentials_temp.json", "w") as temp_file:
-            temp_file.write(google_credentials_json)
-        creds = InstalledAppFlow.from_client_secrets_file("credentials_temp.json", SCOPES).run_local_server(port=0)
-        os.remove("credentials_temp.json")  # 一時ファイルを削除
+        with open("credentials.json", "w") as temp_file:
+            temp_file.write(google_credentials_json)  # 一時的にファイルを作成
 
-    # `token.pickle` のキャッシュを利用
+    # `token.pickle` のキャッシュを利用（過去に認証した場合）
     if os.path.exists("token.pickle"):
         with open("token.pickle", "rb") as token:
             creds = pickle.load(token)
 
+    # 初回認証の場合、Googleの認証フローを実行（ブラウザなしで可能な方法に変更）
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            creds = InstalledAppFlow.from_client_secrets_file("credentials_temp.json", SCOPES).run_local_server(port=0)
+            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
+            creds = flow.run_console()  # `run_local_server()` ではなく `run_console()` に変更
 
+        # 認証情報を保存
         with open("token.pickle", "wb") as token:
             pickle.dump(creds, token)
 
     return build("drive", "v3", credentials=creds)
 
 drive_service = authenticate_google_drive()
-
 
 def fetch_page_content(page_id):
     url = f"{CONFLUENCE_URL}/rest/api/content/{page_id}?expand=body.export_view,title"
