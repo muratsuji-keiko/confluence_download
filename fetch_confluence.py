@@ -67,7 +67,15 @@ def authenticate_google_drive():
             creds.refresh(Request())  # トークンをリフレッシュ
         else:
             flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-            creds = flow.run_console()  # ✅ Render では `run_local_server()` ではなく `run_console()` を使用
+
+            # ✅ Render環境では `run_local_server()` ではなく `authorization_url` を使う
+            auth_url, _ = flow.authorization_url(prompt="consent")
+            print(f"🔗 認証用のURL: {auth_url}")
+
+            # ✅ ユーザーが手動でコードを入力する
+            auth_code = input("🔑 上記のリンクを開き、認証コードを入力してください: ").strip()
+            flow.fetch_token(code=auth_code)
+            creds = flow.credentials
 
         with open("token.pickle", "wb") as token:
             pickle.dump(creds, token)
