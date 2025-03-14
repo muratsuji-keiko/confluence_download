@@ -67,7 +67,15 @@ def authenticate_google_drive():
             creds.refresh(Request())  # トークンをリフレッシュ
         else:
             flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-            creds = flow.run_console()
+            
+            # ✅ 認証コードを環境変数から取得
+            auth_code = os.getenv("GOOGLE_AUTH_CODE")
+            if not auth_code:
+                print("⚠️ 環境変数 GOOGLE_AUTH_CODE が設定されていません。認証コードが必要です。")
+                exit(1)
+
+            flow.fetch_token(code=auth_code)
+            creds = flow.credentials
 
         with open("token.pickle", "wb") as token:
             pickle.dump(creds, token)
