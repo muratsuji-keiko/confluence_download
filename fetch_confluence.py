@@ -8,10 +8,9 @@ import base64
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials  # ✅ 追加（`Refresh Token` 用）
 from google_auth_oauthlib.flow import InstalledAppFlow
 from reportlab.platypus import Paragraph, SimpleDocTemplate
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.pdfbase import pdfmetrics
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.enums import TA_LEFT
@@ -54,7 +53,7 @@ def restore_google_credentials():
 
 restore_google_credentials()
 
-# ✅ Google 認証
+# ✅ Google Drive 認証（`GOOGLE_REFRESH_TOKEN` を使用）
 def authenticate_google_drive():
     creds = None
 
@@ -62,20 +61,24 @@ def authenticate_google_drive():
         with open("token.pickle", "rb") as token:
             creds = pickle.load(token)
 
+    # ✅ `Refresh Token` を使って `Access Token` を取得
     if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())  # トークンをリフレッシュ
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-            
-            # ✅ 認証コードを環境変数から取得
-            auth_code = os.getenv("GOOGLE_AUTH_CODE")
-            if not auth_code:
-                print("⚠️ 環境変数 GOOGLE_AUTH_CODE が設定されていません。認証コードが必要です。")
-                exit(1)
+        refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
+        client_id = os.getenv("GOOGLE_CLIENT_ID")  # `credentials.json` から取得
+        client_secret = os.getenv("GOOGLE_CLIENT_SECRET")  # `credentials.json` から取得
 
-            flow.fetch_token(code=auth_code)
-            creds = flow.credentials
+        if not refresh_token or not client_id or not client_secret:
+            print("⚠️ 環境変数 GOOGLE_REFRESH_TOKEN, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET が必要です。")
+            exit(1)
+
+        creds = Credentials(
+            None,
+            refresh_token=refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=client_id,
+            client_secret=client_secret
+        )
+        creds.refresh(Request())  # ✅ 自動的に `Access Token` を更新
 
         with open("token.pickle", "wb") as token:
             pickle.dump(creds, token)
@@ -107,54 +110,6 @@ def fetch_page_content(page_id):
     text_content = re.sub(r'[\u200B-\u200D\uFEFF]', '', text_content)
 
     return title, f"# {title}\n\n{text_content}"
-
-def fetch_child_pages(page_id):
-    """指定した Confluence ページの子ページ一覧を取得"""
-    url = f"{CONFLUENCE_URL}/rest/api/content/{page_id}/child/page?expand=title"
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        print(f"❌ Error fetching child pages: {response.status_code} - {response.text}")
-        return []
-    return response.json().get("results", [])
-
-def upload_to_google_drive(file_name, content, parent_folder_id, page_id):
-    """ページIDを使ってGoogle Drive内のファイルを上書き判定し、PDFを保存"""
-
-    pdf_buffer = io.BytesIO()
-    doc = SimpleDocTemplate(pdf_buffer, pagesize=A4)
-
-    styles = getSampleStyleSheet()
-    styles["Normal"].fontSize = 10
-    styles["Normal"].leading = 12
-    styles["Normal"].alignment = TA_LEFT
-    styles["Normal"].textColor = colors.black
-
-    title_paragraph = Paragraph(f"<b>{file_name}</b>", styles["Normal"])
-    content = content.replace("\n", "<br/>")
-    body_paragraph = Paragraph(content, styles["Normal"])
-
-    elements = [title_paragraph, body_paragraph]
-    doc.build(elements)
-
-    pdf_buffer.seek(0)
-    media = MediaIoBaseUpload(pdf_buffer, mimetype="application/pdf", resumable=True)
-
-    formatted_file_name = f"{file_name}.pdf"
-    query = f"name = '{formatted_file_name}' and '{parent_folder_id}' in parents and trashed=false"
-    results = drive_service.files().list(
-        q=query, fields="files(id, name, appProperties)", supportsAllDrives=True, includeItemsFromAllDrives=True
-    ).execute()
-    existing_files = results.get("files", [])
-
-    matching_file = next((file for file in existing_files if file.get("appProperties", {}).get("page_id") == str(page_id)), None)
-
-    if matching_file:
-        drive_service.files().update(fileId=matching_file["id"], media_body=media, supportsAllDrives=True).execute()
-        print(f"♻️ Updated: {formatted_file_name}")
-    else:
-        file_metadata = {"name": formatted_file_name, "parents": [parent_folder_id], "appProperties": {"page_id": str(page_id)}}
-        drive_service.files().create(body=file_metadata, media_body=media, fields="id", supportsAllDrives=True).execute()
-        print(f"✅ Uploaded: {formatted_file_name}")
 
 def fetch_and_upload_recursive(page_id, parent_folder_id):
     """再帰的に Confluence ページを取得し、Google Drive に保存"""
