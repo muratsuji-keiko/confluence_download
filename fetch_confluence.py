@@ -4,6 +4,7 @@ import os
 import re
 import pickle
 import base64
+import json
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -41,8 +42,21 @@ PARENT_PAGES = [
 EXCLUDED_TITLES = ["廃止", "2020予算", "2020年度", "2021予算", "2021年度",
                     "2022予算", "2022年度", "2023予算", "2023年度", "2024予算", "2024年度"]
 
+SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+
 def authenticate_google_drive():
     creds = None
+
+    # Render では環境変数 `GOOGLE_CREDENTIALS` を使用
+    google_credentials_base64 = os.getenv("GOOGLE_CREDENTIALS")
+    if google_credentials_base64:
+        google_credentials_json = base64.b64decode(google_credentials_base64).decode("utf-8")
+        with open("credentials_temp.json", "w") as temp_file:
+            temp_file.write(google_credentials_json)
+        creds = InstalledAppFlow.from_client_secrets_file("credentials_temp.json", SCOPES).run_local_server(port=0)
+        os.remove("credentials_temp.json")  # 一時ファイルを削除
+
+    # `token.pickle` のキャッシュを利用
     if os.path.exists("token.pickle"):
         with open("token.pickle", "rb") as token:
             creds = pickle.load(token)
@@ -51,8 +65,7 @@ def authenticate_google_drive():
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-            creds = flow.run_local_server(port=0)
+            creds = InstalledAppFlow.from_client_secrets_file("credentials_temp.json", SCOPES).run_local_server(port=0)
 
         with open("token.pickle", "wb") as token:
             pickle.dump(creds, token)
@@ -60,6 +73,7 @@ def authenticate_google_drive():
     return build("drive", "v3", credentials=creds)
 
 drive_service = authenticate_google_drive()
+
 
 def fetch_page_content(page_id):
     url = f"{CONFLUENCE_URL}/rest/api/content/{page_id}?expand=body.export_view,title"
